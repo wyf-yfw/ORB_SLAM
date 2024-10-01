@@ -1,179 +1,188 @@
 /**
-* This file is part of ORB-SLAM3
+* 该文件是 ORB-SLAM3 项目的一部分
 *
-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
-*
-* ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
-* License as published by the Free Software Foundation, either version 3 of the License, or
-* (at your option) any later version.
-*
-* ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
-* the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License along with ORB-SLAM3.
-* If not, see <http://www.gnu.org/licenses/>.
+* ORB-SLAM3 是自由软件：你可以根据 GNU 通用公共许可证的条款重新发布和/或修改它。
+* 本程序按"现状"提供，没有任何保证。有关详细信息，请参见 GNU 通用公共许可证。
 */
 
-#include "ViewerAR.h"
-
-#include <opencv2/highgui/highgui.hpp>
-#include <Eigen/Dense>
-#include <opencv2/core/eigen.hpp>
-
-#include <mutex>
-#include <thread>
-#include <cstdlib>
+#include "ViewerAR.h" // 引入 AR 查看器相关的头文件
+#include <opencv2/highgui/highgui.hpp> // OpenCV 显示图片的头文件
+#include <Eigen/Dense> // 使用 Eigen 库进行矩阵运算
+#include <opencv2/core/eigen.hpp> // OpenCV 与 Eigen 库的相互转换
+#include <mutex> // 多线程同步相关
+#include <thread> // 多线程相关
+#include <cstdlib> // 标准库
 
 using namespace std;
 
 namespace ORB_SLAM3
 {
 
-const float eps = 1e-4;
+const float eps = 1e-4; // 用于避免数值计算不稳定的小值
 
+// 计算 SO3（特殊正交群）的指数映射，输入为旋转向量的三个分量 x, y, z
 cv::Mat ExpSO3(const float &x, const float &y, const float &z)
 {
-    cv::Mat I = cv::Mat::eye(3,3,CV_32F);
-    const float d2 = x*x+y*y+z*z;
-    const float d = sqrt(d2);
+    cv::Mat I = cv::Mat::eye(3,3,CV_32F); // 生成一个 3x3 单位矩阵
+    const float d2 = x*x + y*y + z*z; // 旋转向量的模平方
+    const float d = sqrt(d2); // 旋转向量的模（长度）
+
+    // 构造反对称矩阵 W
     cv::Mat W = (cv::Mat_<float>(3,3) << 0, -z, y,
-                 z, 0, -x,
-                 -y,  x, 0);
-    if(d<eps)
-        return (I + W + 0.5f*W*W);
+                                         z, 0, -x,
+                                        -y,  x, 0);
+    // 当旋转向量非常小时，采用近似公式
+    if(d < eps)
+        return (I + W + 0.5f * W * W); // 泰勒展开的二次近似
     else
-        return (I + W*sin(d)/d + W*W*(1.0f-cos(d))/d2);
+        return (I + W * sin(d) / d + W * W * (1.0f - cos(d)) / d2); // 标准 Rodrigues 公式
 }
 
+// 重载函数，输入为 3x1 的旋转向量
 cv::Mat ExpSO3(const cv::Mat &v)
 {
-    return ExpSO3(v.at<float>(0),v.at<float>(1),v.at<float>(2));
+    return ExpSO3(v.at<float>(0), v.at<float>(1), v.at<float>(2)); // 从矩阵中提取旋转向量的分量
 }
 
+// ViewerAR 类的构造函数，进行必要的初始化
 ViewerAR::ViewerAR(){}
 
+// ViewerAR 的主循环，负责显示与交互
 void ViewerAR::Run()
 {
-    int w,h,wui;
+    int w, h, wui; // 定义图像宽度、高度和 UI 面板宽度
 
-    cv::Mat im, Tcw;
-    int status;
-    vector<cv::KeyPoint> vKeys;
-    vector<MapPoint*> vMPs;
+    cv::Mat im, Tcw; // 定义图像和相机位姿矩阵
+    int status; // 表示系统当前状态（如 SLAM 正常、VO 等）
+    vector<cv::KeyPoint> vKeys; // 保存图像中的关键点
+    vector<MapPoint*> vMPs; // 保存三维地图点
 
+    // 等待获取不为空的图像
     while(1)
     {
-        GetImagePose(im,Tcw,status,vKeys,vMPs);
-        if(im.empty())
+        GetImagePose(im, Tcw, status, vKeys, vMPs); // 获取最新的图像、相机位姿和状态
+        if(im.empty()) // 如果图像为空，等待一段时间
             cv::waitKey(mT);
         else
         {
-            w = im.cols;
-            h = im.rows;
-            break;
+            w = im.cols; // 获取图像宽度
+            h = im.rows; // 获取图像高度
+            break; // 退出循环
         }
     }
 
-    wui=200;
+    wui = 200; // UI 面板的宽度
 
-    pangolin::CreateWindowAndBind("Viewer",w+wui,h);
+    // 创建一个用于显示的窗口，并绑定 OpenGL 上下文
+    pangolin::CreateWindowAndBind("Viewer", w + wui, h);
 
+    // 启用深度测试和混合模式
     glEnable(GL_DEPTH_TEST);
-    glEnable (GL_BLEND);
+    glEnable(GL_BLEND);
 
-    pangolin::CreatePanel("menu").SetBounds(0.0,1.0,0.0,pangolin::Attach::Pix(wui));
-    pangolin::Var<bool> menu_detectplane("menu.Insert Cube",false,false);
-    pangolin::Var<bool> menu_clear("menu.Clear All",false,false);
-    pangolin::Var<bool> menu_drawim("menu.Draw Image",true,true);
-    pangolin::Var<bool> menu_drawcube("menu.Draw Cube",true,true);
-    pangolin::Var<float> menu_cubesize("menu. Cube Size",0.05,0.01,0.3);
-    pangolin::Var<bool> menu_drawgrid("menu.Draw Grid",true,true);
-    pangolin::Var<int> menu_ngrid("menu. Grid Elements",3,1,10);
-    pangolin::Var<float> menu_sizegrid("menu. Element Size",0.05,0.01,0.3);
-    pangolin::Var<bool> menu_drawpoints("menu.Draw Points",false,true);
+    // 创建用于 UI 面板的控件和菜单项
+    pangolin::CreatePanel("menu").SetBounds(0.0, 1.0, 0.0, pangolin::Attach::Pix(wui));
+    pangolin::Var<bool> menu_detectplane("menu.Insert Cube", false, false); // 插入立方体
+    pangolin::Var<bool> menu_clear("menu.Clear All", false, false); // 清除所有立方体
+    pangolin::Var<bool> menu_drawim("menu.Draw Image", true, true); // 是否绘制图像
+    pangolin::Var<bool> menu_drawcube("menu.Draw Cube", true, true); // 是否绘制立方体
+    pangolin::Var<float> menu_cubesize("menu.Cube Size", 0.05, 0.01, 0.3); // 立方体尺寸控制
+    pangolin::Var<bool> menu_drawgrid("menu.Draw Grid", true, true); // 是否绘制网格
+    pangolin::Var<int> menu_ngrid("menu.Grid Elements", 3, 1, 10); // 网格元素数量
+    pangolin::Var<float> menu_sizegrid("menu.Element Size", 0.05, 0.01, 0.3); // 网格元素大小
+    pangolin::Var<bool> menu_drawpoints("menu.Draw Points", false, true); // 是否绘制跟踪点
 
-    pangolin::Var<bool> menu_LocalizationMode("menu.Localization Mode",false,true);
-    bool bLocalizationMode = false;
+    // 本地化模式开关
+    pangolin::Var<bool> menu_LocalizationMode("menu.Localization Mode", false, true);
+    bool bLocalizationMode = false; // 初始化本地化模式标志
 
+    // 设置用于显示图像的 OpenGL 视口
     pangolin::View& d_image = pangolin::Display("image")
-            .SetBounds(0,1.0f,pangolin::Attach::Pix(wui),1.0f,(float)w/h)
-            .SetLock(pangolin::LockLeft, pangolin::LockTop);
+        .SetBounds(0, 1.0f, pangolin::Attach::Pix(wui), 1.0f, (float)w/h)
+        .SetLock(pangolin::LockLeft, pangolin::LockTop);
 
-    pangolin::GlTexture imageTexture(w,h,GL_RGB,false,0,GL_RGB,GL_UNSIGNED_BYTE);
+    pangolin::GlTexture imageTexture(w, h, GL_RGB, false, 0, GL_RGB, GL_UNSIGNED_BYTE); // 创建 OpenGL 纹理对象，用于显示图像
 
-    pangolin::OpenGlMatrixSpec P = pangolin::ProjectionMatrixRDF_TopLeft(w,h,fx,fy,cx,cy,0.001,1000);
+    // 设置相机投影矩阵
+    pangolin::OpenGlMatrixSpec P = pangolin::ProjectionMatrixRDF_TopLeft(w, h, fx, fy, cx, cy, 0.001, 1000);
 
-    vector<Plane*> vpPlane;
+    vector<Plane*> vpPlane; // 保存虚拟物体的平面
 
+    // 主循环
     while(1)
     {
-
+        // 检查并更新本地化模式状态
         if(menu_LocalizationMode && !bLocalizationMode)
         {
-            mpSystem->ActivateLocalizationMode();
+            mpSystem->ActivateLocalizationMode(); // 激活本地化模式
             bLocalizationMode = true;
         }
         else if(!menu_LocalizationMode && bLocalizationMode)
         {
-            mpSystem->DeactivateLocalizationMode();
+            mpSystem->DeactivateLocalizationMode(); // 取消本地化模式
             bLocalizationMode = false;
         }
 
+        // 清除颜色和深度缓冲区
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Activate camera view
+        // 激活图像显示区域
         d_image.Activate();
-        glColor3f(1.0,1.0,1.0);
+        glColor3f(1.0, 1.0, 1.0); // 设置绘制颜色为白色
 
-        // Get last image and its computed pose from SLAM
-        GetImagePose(im,Tcw,status,vKeys,vMPs);
+        // 获取最新的图像和相机位姿
+        GetImagePose(im, Tcw, status, vKeys, vMPs);
 
-        // Add text to image
-        PrintStatus(status,bLocalizationMode,im);
+        // 在图像上显示状态信息
+        PrintStatus(status, bLocalizationMode, im);
 
+        // 如果开启了绘制跟踪点选项，绘制跟踪点
         if(menu_drawpoints)
-            DrawTrackedPoints(vKeys,vMPs,im);
+            DrawTrackedPoints(vKeys, vMPs, im);
 
-        // Draw image
+        // 如果开启了绘制图像选项，绘制图像
         if(menu_drawim)
-            DrawImageTexture(imageTexture,im);
+            DrawImageTexture(imageTexture, im);
 
+        // 清除深度缓冲区
         glClear(GL_DEPTH_BUFFER_BIT);
 
-        // Load camera projection
+        // 加载相机投影矩阵
         glMatrixMode(GL_PROJECTION);
         P.Load();
 
+        // 切换到模型视图矩阵
         glMatrixMode(GL_MODELVIEW);
 
-        // Load camera pose
+        // 加载相机位姿矩阵
         LoadCameraPose(Tcw);
 
-        // Draw virtual things
-        if(status==2)
+        // 绘制虚拟物体（立方体、网格等）
+        if(status == 2)
         {
+            // 如果选择了清除立方体，删除所有虚拟平面
             if(menu_clear)
             {
                 if(!vpPlane.empty())
                 {
-                    for(size_t i=0; i<vpPlane.size(); i++)
+                    for(size_t i = 0; i < vpPlane.size(); i++)
                     {
-                        delete vpPlane[i];
+                        delete vpPlane[i]; // 删除每个平面
                     }
-                    vpPlane.clear();
+                    vpPlane.clear(); // 清空平面列表
                     cout << "All cubes erased!" << endl;
                 }
                 menu_clear = false;
             }
+
+            // 如果选择了插入立方体，检测平面并插入新的虚拟物体
             if(menu_detectplane)
             {
-                Plane* pPlane = DetectPlane(Tcw,vMPs,50);
+                Plane* pPlane = DetectPlane(Tcw, vMPs, 50); // 检测一个平面
                 if(pPlane)
                 {
                     cout << "New virtual cube inserted!" << endl;
-                    vpPlane.push_back(pPlane);
+                    vpPlane.push_back(pPlane); // 将平面添加到列表中
                 }
                 else
                 {
@@ -182,10 +191,10 @@ void ViewerAR::Run()
                 menu_detectplane = false;
             }
 
+            // 绘制虚拟物体
             if(!vpPlane.empty())
             {
-                // Recompute plane if there has been a loop closure or global BA
-                // In localization mode, map is not updated so we do not need to recompute
+                // 如果发生了闭环或者全局优化，需要重新计算虚拟物体的位置
                 bool bRecompute = false;
                 if(!bLocalizationMode)
                 {
@@ -196,7 +205,8 @@ void ViewerAR::Run()
                     }
                 }
 
-                for(size_t i=0; i<vpPlane.size(); i++)
+                // 遍历所有虚拟平面，绘制虚拟立方体和网格
+                for(size_t i = 0; i < vpPlane.size(); i++)
                 {
                     Plane* pPlane = vpPlane[i];
 
@@ -204,36 +214,34 @@ void ViewerAR::Run()
                     {
                         if(bRecompute)
                         {
-                            pPlane->Recompute();
+                            pPlane->Recompute(); // 重新计算平面
                         }
-                        glPushMatrix();
-                        pPlane->glTpw.Multiply();
+                        glPushMatrix(); // 保存当前矩阵状态
+                        pPlane->glTpw.Multiply(); // 加载平面的位姿矩阵
 
-                        // Draw cube
+                        // 如果开启了绘制立方体选项，绘制立方体
                         if(menu_drawcube)
                         {
                             DrawCube(menu_cubesize);
                         }
 
-                        // Draw grid plane
+                        // 如果开启了绘制网格选项，绘制网格
                         if(menu_drawgrid)
                         {
-                            DrawPlane(menu_ngrid,menu_sizegrid);
+                            DrawPlane(menu_ngrid, menu_sizegrid);
                         }
 
-                        glPopMatrix();
+                        glPopMatrix(); // 恢复矩阵状态
                     }
                 }
             }
-
-
         }
 
-        pangolin::FinishFrame();
-        usleep(mT*1000);
+        pangolin::FinishFrame(); // 完成当前帧绘制
+        usleep(mT * 1000); // 休眠一段时间，控制帧率
     }
-
 }
+
 
 void ViewerAR::SetImagePose(const cv::Mat &im, const cv::Mat &Tcw, const int &status, const vector<cv::KeyPoint> &vKeys, const vector<ORB_SLAM3::MapPoint*> &vMPs)
 {
